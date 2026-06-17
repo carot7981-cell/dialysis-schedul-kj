@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.streamlit/
+*.log
+cloudflared_*.log
+.env
+.venv/
+venv/
