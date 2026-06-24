@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
+from io import StringIO
 from pathlib import Path
-from typing import Iterable
 
 import pandas as pd
 import streamlit as st
 
 
 APP_TITLE = "투석환자 일정 체크 도우미"
+SAVED_DATA_DIR = Path(".data")
+SAVED_DATA_FILE = SAVED_DATA_DIR / "saved_schedule.csv"
 PRIVACY_NOTICE = (
     "실제 사용 시 환자 전체 이름, 주민번호, 연락처, 자세한 진단명 등 민감정보 입력을 피하고 "
     "병원 내부 기준에 맞는 최소 정보만 입력하세요."
@@ -166,9 +168,48 @@ def normalize_schedule_dataframe(raw_df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def empty_schedule_dataframe() -> pd.DataFrame:
+    return pd.DataFrame(columns=BASE_COLUMNS)
+
+
+def dataframe_to_storage_text(df: pd.DataFrame) -> str:
+    normalized_df = normalize_schedule_dataframe(df)
+    return normalized_df.to_json(orient="records", force_ascii=False)
+
+
+def dataframe_from_storage_text(saved_text: str | None) -> pd.DataFrame:
+    if not saved_text:
+        return empty_schedule_dataframe()
+    try:
+        loaded_df = pd.read_json(StringIO(saved_text), dtype=False)
+        return normalize_schedule_dataframe(loaded_df)
+    except Exception:
+        return empty_schedule_dataframe()
+
+
+def save_schedules_to_file(df: pd.DataFrame) -> None:
+    SAVED_DATA_DIR.mkdir(exist_ok=True)
+    normalize_schedule_dataframe(df).to_csv(SAVED_DATA_FILE, index=False, encoding="utf-8-sig")
+
+
+def load_schedules_from_file() -> pd.DataFrame:
+    if not SAVED_DATA_FILE.exists():
+        return empty_schedule_dataframe()
+    try:
+        return normalize_schedule_dataframe(pd.read_csv(SAVED_DATA_FILE))
+    except Exception:
+        return empty_schedule_dataframe()
+
+
+def persist_current_schedules() -> None:
+    schedules_df = normalize_schedule_dataframe(st.session_state.schedules)
+    save_schedules_to_file(schedules_df)
+
+
 def initialize_state() -> None:
     if "schedules" not in st.session_state:
-        st.session_state.schedules = pd.DataFrame(columns=BASE_COLUMNS)
+        saved_df = load_schedules_from_file()
+        st.session_state.schedules = saved_df if not saved_df.empty else empty_schedule_dataframe()
 
 
 def add_schedule(row: dict[str, str]) -> None:
@@ -329,20 +370,37 @@ def render_input_form() -> None:
                     "확인 상태": status,
                 }
             )
-            st.success("일정이 전체 환자 일정표에 추가되었습니다.")
+            persist_current_schedules()
+            st.success("일정이 전체 환자 일정표에 추가되고 저장되었습니다.")
 
 
 def render_file_tools() -> None:
-    st.subheader("샘플 및 파일 불러오기")
+    st.subheader("저장 및 파일 불러오기")
     col1, col2 = st.columns(2)
     with col1:
-        if st.button("샘플 일정 불러오기", width="stretch"):
-            st.session_state.schedules = create_sample_data()
-            st.success("비식별 샘플 일정 3건을 불러왔습니다.")
+        if st.button("저장된/과거 일정 불러오기", width="stretch"):
+            file_df = load_schedules_from_file()
+            loaded_df = file_df
+            if loaded_df.empty:
+                st.warning("아직 저장된 일정이 없습니다. 일정을 추가한 뒤 저장하거나 CSV/Excel 파일을 업로드해 주세요.")
+            else:
+                st.session_state.schedules = loaded_df
+                save_schedules_to_file(loaded_df)
+                st.success(f"저장된 과거 일정 {len(loaded_df)}건을 불러왔습니다.")
     with col2:
+        if st.button("현재 일정 저장하기", width="stretch", disabled=st.session_state.schedules.empty):
+            persist_current_schedules()
+            st.success(f"현재 일정 {len(st.session_state.schedules)}건을 저장했습니다.")
+
+    col3, col4 = st.columns(2)
+    with col3:
         if st.button("전체 일정 비우기", width="stretch"):
-            st.session_state.schedules = pd.DataFrame(columns=BASE_COLUMNS)
-            st.success("현재 실행 중인 일정표를 비웠습니다.")
+            st.session_state.schedules = empty_schedule_dataframe()
+            st.success("화면의 일정표를 비웠습니다. 저장된 과거 데이터는 삭제하지 않았습니다.")
+    with col4:
+        if st.button("테스트용 샘플 보기", width="stretch"):
+            st.session_state.schedules = create_sample_data()
+            st.info("테스트용 비식별 샘플 3건을 불러왔습니다. 실제 저장 데이터로 쓰려면 현재 일정 저장하기를 눌러 주세요.")
 
     uploaded_file = st.file_uploader("CSV 또는 Excel 일정 파일 업로드", type=["csv", "xlsx", "xls"])
     if uploaded_file:
@@ -351,7 +409,8 @@ def render_file_tools() -> None:
             st.session_state.schedules = normalize_schedule_dataframe(
                 pd.concat([st.session_state.schedules, uploaded_df], ignore_index=True)
             )
-            st.success(f"{uploaded_file.name} 파일에서 {len(uploaded_df)}건을 불러왔습니다.")
+            persist_current_schedules()
+            st.success(f"{uploaded_file.name} 파일에서 {len(uploaded_df)}건을 불러오고 저장했습니다.")
         except Exception:
             st.error("파일을 읽지 못했습니다. 열 이름과 파일 형식을 확인해 주세요. CSV 또는 Excel 파일을 사용할 수 있습니다.")
 
