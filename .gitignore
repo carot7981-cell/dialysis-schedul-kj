@@ -6,3 +6,4 @@ cloudflared_*.log
 .env
 .venv/
 venv/
+.data/
