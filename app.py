@@ -153,6 +153,8 @@ def create_sample_data() -> pd.DataFrame:
 
 def normalize_schedule_dataframe(raw_df: pd.DataFrame) -> pd.DataFrame:
     df = raw_df.copy()
+    df.columns = [str(column).strip() for column in df.columns]
+    df = rename_uploaded_columns(df)
     for column in BASE_COLUMNS:
         if column not in df.columns:
             df[column] = ""
@@ -166,6 +168,68 @@ def normalize_schedule_dataframe(raw_df: pd.DataFrame) -> pd.DataFrame:
     df["확인 상태"] = df["확인 상태"].fillna("확인 전").astype(str)
     df.loc[~df["확인 상태"].isin(["확인 전", "확인 완료"]), "확인 상태"] = "확인 전"
     return df
+
+
+def rename_uploaded_columns(df: pd.DataFrame) -> pd.DataFrame:
+    def compact(text: str) -> str:
+        return "".join(str(text).lower().replace("\n", " ").split())
+
+    column_rules = {
+        "환자 식별 정보": ["환자식별정보", "환자명", "환자이름", "성명", "이름", "환자", "등록번호", "병록번호", "차트번호"],
+        "병동 또는 구분": ["병동또는구분", "병동", "구분", "투석반", "스케줄", "요일", "방"],
+        "신환 검사일": ["신환검사일", "신환", "초진", "신규"],
+        "1개월 검사일": ["1개월검사일", "1개월", "1달", "한달"],
+        "3개월 검사일": ["3개월검사일", "3개월", "세달"],
+        "6개월 검사일": ["6개월검사일", "6개월", "여섯달"],
+        "다음 처방 날짜": ["다음처방날짜", "다음처방", "다음처방일", "차기처방"],
+        "이번달 처방 날짜": ["이번달처방날짜", "이번달처방", "이번달처방일", "이번처방", "당월처방"],
+        "혈관외과 방문일": ["혈관외과방문일", "혈관외과", "혈관방문", "혈관진료", "혈관"],
+        "혈액검사 특이 소견": ["혈액검사특이소견", "특이소견", "검사특이", "혈액검사", "검사메모", "소견"],
+        "비고": ["비고", "메모", "참고", "remark", "note"],
+        "확인 상태": ["확인상태", "상태", "확인", "완료여부"],
+    }
+    rename_map = {}
+    used_targets = set()
+    for source_column in df.columns:
+        source_key = compact(source_column)
+        for target_column, candidates in column_rules.items():
+            if target_column in used_targets:
+                continue
+            if source_key == compact(target_column) or any(candidate in source_key for candidate in candidates):
+                rename_map[source_column] = target_column
+                used_targets.add(target_column)
+                break
+    return df.rename(columns=rename_map)
+
+
+def find_excel_header_row(uploaded_file, sheet_name, engine: str | None) -> int:
+    uploaded_file.seek(0)
+    preview_df = pd.read_excel(uploaded_file, sheet_name=sheet_name, header=None, nrows=10, engine=engine)
+    keywords = ["환자", "성명", "이름", "병동", "신환", "1개월", "3개월", "6개월", "처방", "혈관", "비고"]
+    for index, row in preview_df.iterrows():
+        row_text = " ".join(str(value) for value in row.dropna().tolist())
+        matched_count = sum(keyword in row_text for keyword in keywords)
+        if matched_count >= 2:
+            return int(index)
+    return 0
+
+
+def read_excel_schedule(uploaded_file, suffix: str) -> pd.DataFrame:
+    engine = "openpyxl" if suffix == ".xlsx" else "xlrd"
+    uploaded_file.seek(0)
+    excel_file = pd.ExcelFile(uploaded_file, engine=engine)
+    frames = []
+    for sheet_name in excel_file.sheet_names:
+        header_row = find_excel_header_row(uploaded_file, sheet_name, engine)
+        uploaded_file.seek(0)
+        sheet_df = pd.read_excel(uploaded_file, sheet_name=sheet_name, header=header_row, engine=engine)
+        sheet_df = sheet_df.dropna(how="all")
+        sheet_df = sheet_df.loc[:, ~sheet_df.columns.astype(str).str.startswith("Unnamed")]
+        if not sheet_df.empty:
+            frames.append(sheet_df)
+    if not frames:
+        return empty_schedule_dataframe()
+    return pd.concat(frames, ignore_index=True)
 
 
 def empty_schedule_dataframe() -> pd.DataFrame:
@@ -222,9 +286,14 @@ def add_schedule(row: dict[str, str]) -> None:
 def read_uploaded_schedule(uploaded_file) -> pd.DataFrame:
     suffix = Path(uploaded_file.name).suffix.lower()
     if suffix == ".csv":
-        return pd.read_csv(uploaded_file)
+        try:
+            uploaded_file.seek(0)
+            return pd.read_csv(uploaded_file, encoding="utf-8-sig")
+        except UnicodeDecodeError:
+            uploaded_file.seek(0)
+            return pd.read_csv(uploaded_file, encoding="cp949")
     if suffix in {".xlsx", ".xls"}:
-        return pd.read_excel(uploaded_file)
+        return read_excel_schedule(uploaded_file, suffix)
     raise ValueError("CSV 또는 Excel 파일만 불러올 수 있습니다.")
 
 
@@ -412,7 +481,10 @@ def render_file_tools() -> None:
             persist_current_schedules()
             st.success(f"{uploaded_file.name} 파일에서 {len(uploaded_df)}건을 불러오고 저장했습니다.")
         except Exception:
-            st.error("파일을 읽지 못했습니다. 열 이름과 파일 형식을 확인해 주세요. CSV 또는 Excel 파일을 사용할 수 있습니다.")
+            st.error(
+                "파일을 읽지 못했습니다. 예전 엑셀(.xls), 최신 엑셀(.xlsx), CSV 파일을 지원합니다. "
+                "계속 안 되면 파일을 Excel에서 열어 .xlsx로 다시 저장한 뒤 업로드해 주세요."
+            )
 
 
 def render_event_cards(events_df: pd.DataFrame, empty_message: str) -> None:
